@@ -3,14 +3,17 @@ import { ApiError } from "../utils/ApiError.js";
 import { User } from "../models/user.model.js";
 import { uploadOnCloudinary } from "../utils/cloudinary.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
+import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
+import { response } from "express";
 
 const generateAccessAndRefreshTokens = async (userId) => {
   try {
     const user = await User.findById(userId);
     const accessToken = user.generateAccessToken();
     const refreshToken = user.generateRefreshToken();
-
     user.refreshToken = refreshToken;
+
     await user.save({ validateBeforeSave: false });
 
     return { accessToken, refreshToken };
@@ -93,16 +96,23 @@ const registerUser = asyncHandler(async (req, res) => {
 const loginUser = asyncHandler(async (req, res) => {
   // req body -> data
   // username or email
-  // find the user
-  // password check
-  // access and refresh token generation
-  // send cookie
+  //find the user
+  //password check
+  //access and referesh token
+  //send cookie
 
   const { email, username, password } = req.body;
-  console.log(email);
+  // console.log(email);
+
   if (!username && !email) {
-    throw new ApiError(400, "Username and Email Required");
+    throw new ApiError(400, "username or email is required");
   }
+
+  // Here is an alternative of above code based on logic discussed in video:
+  // if (!(username || email)) {
+  //     throw new ApiError(400, "username or email is required")
+
+  // }
 
   const user = await User.findOne({
     $or: [{ username }, { email }],
@@ -130,7 +140,7 @@ const loginUser = asyncHandler(async (req, res) => {
     httpOnly: true,
     secure: true,
   };
-
+  console.log(accessToken, refreshToken);
   return res
     .status(200)
     .cookie("accessToken", accessToken, options)
@@ -152,8 +162,8 @@ const logoutUser = asyncHandler(async (req, res) => {
   await User.findByIdAndUpdate(
     req.user._id,
     {
-      $set: {
-        refreshToken: undefined,
+      $unset: {
+        refreshToken: 1,
       },
     },
     {
@@ -173,4 +183,163 @@ const logoutUser = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, {}, "User Logged Out"));
 });
 
-export { registerUser, loginUser, logoutUser };
+const refreshAccessToken = asyncHandler(async (req, res) => {
+  try {
+    const incomingRefreshToken =
+      req.cookies.refreshToken || req.body.refreshToken;
+
+    if (!incomingRefreshToken) {
+      throw new ApiError(401, "Unautorized Request");
+    }
+    const decodedToken = jwt.verify(
+      incomingRefreshToken,
+      process.env.REFRESH_TOKEN_SECRET
+    );
+
+    const user = await User.findById(decodedToken?._id);
+    if (!user) {
+      throw new ApiError(401, "Invalid Refresh Token");
+    }
+
+    if (incomingRefreshToken !== user?.refreshToken) {
+      throw new ApiError(401, "Refresh Token Expired");
+    }
+
+    const options = {
+      httpOnly: true,
+      secure: true,
+    };
+    const { accessToken, newrefreshToken } =
+      await generateAccessAndRefreshTokens(user._id);
+
+    return res
+      .status(200)
+      .cookie("accessToken", accessToken, options)
+      .cookie("refreshToken", newrefreshToken, options)
+      .json(
+        new ApiResponse(
+          200,
+          {
+            accessToken,
+            refreshToken: newrefreshToken,
+          },
+          "Access Token Refreshed"
+        )
+      );
+  } catch (error) {
+    throw new ApiError(401, error?.message || "Invalid Refresh Token");
+  }
+});
+
+const changeCurrentPassword = asyncHandler(async (req, res) => {
+  const { oldPassword, newPassword } = req.body;
+
+  const user = await User.findById(req.user?._id);
+
+  const isPasswordCorrect = await user.isPasswordCorrect(oldPassword);
+
+  if (!isPasswordCorrect) {
+    throw new ApiError(400, "Invalid Password");
+  }
+
+  user.password = newPassword;
+  await user.save({ validateBeforeSave: false });
+
+  return response
+    .status(200)
+    .json(new ApiResponse(200, {}, "Password Changed Sucessfully"));
+});
+
+const getCurrentUser = asyncHandler(async (req, res) => {
+  return res
+    .status(200)
+    .json(200, req.user, "Current User Fetched Sucessfully");
+});
+
+const updateAccountDetails = asyncHandler(async (req, res) => {
+  const { fullname, email } = req.body;
+
+  if (!fullname || !email) {
+    throw new ApiError(400, "All Fields Required");
+  }
+
+  const user = User.findByIdAndUpdate(
+    req.user?._id,
+    {
+      $set: {
+        fullname,
+        email,
+      },
+    },
+    { new: true }
+  ).select("-password");
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, user, "Account Updated Sucessfully"));
+});
+
+const updateUserAvatar = asyncHandler(async (req, res) => {
+  const avatarLoacalPath = req.file?.path;
+
+  if (!avatarLoacalPath) {
+    throw new ApiError(400, "Avatar File Missing");
+  }
+  const avatar = await uploadOnCloudinary(avatarLoacalPath);
+  if (!avatar.url) {
+    throw new ApiError(400, "Error While Uploading on Avatar");
+  }
+
+  const user = await User.findByIdAndUpdate(
+    req.user?._id,
+    {
+      $set: {
+        avatar: avatar.url,
+      },
+    },
+    {
+      new: true,
+    }
+  ).select("-password");
+  return res
+    .status(200)
+    .json(new ApiResponse(200, user, "Avatar Image Updated"));
+});
+const updateUserCoverImage = asyncHandler(async (req, res) => {
+  const coverLocalPath = req.file?.path;
+
+  if (!coverLocalPath) {
+    throw new ApiError(400, "Cover File Missing");
+  }
+  const coverImage = await uploadOnCloudinary(coverLocalPath);
+  if (!coverImage.url) {
+    throw new ApiError(400, "Error While Uploading on CoverImage");
+  }
+
+  const user = await User.findByIdAndUpdate(
+    req.user?._id,
+    {
+      $set: {
+        coverImage: coverImage.url,
+      },
+    },
+    {
+      new: true,
+    }
+  ).select("-password");
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, user, "Cover Image Updated"));
+});
+export {
+  registerUser,
+  loginUser,
+  logoutUser,
+  refreshAccessToken,
+  changeCurrentPassword,
+  getCurrentUser,
+  updateAccountDetails,
+  updateUserAvatar,
+  updateUserCoverImage,
+};
